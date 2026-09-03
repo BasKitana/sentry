@@ -8,6 +8,8 @@ effect on the system.
 """
 
 import os
+import re
+import subprocess
 import time
 
 import psutil
@@ -202,3 +204,57 @@ def get_temp_file_info() -> dict:
         "total_size_mb": total_size_mb,
         "total_file_count": total_file_count,
     }
+
+
+@safety.register_tool(
+    name="get_power_plan",
+    description=(
+        "Report the currently active Windows power plan (name and GUID), via "
+        "'powercfg /getactivescheme'. Call when the user asks about power/performance "
+        "settings or battery behavior, or before considering set_power_plan()."
+    ),
+    input_schema={"type": "object", "properties": {}, "required": []},
+    tier=Tier.AUTO,
+    is_action=False,
+)
+def get_power_plan() -> dict:
+    try:
+        proc = subprocess.run(
+            ["powercfg", "/getactivescheme"], capture_output=True, text=True, timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return {"error": True, "message": f"Failed to query the active power plan: {e}"}
+
+    if proc.returncode != 0:
+        detail = proc.stderr.strip() or proc.stdout.strip()
+        return {"error": True, "message": f"'powercfg /getactivescheme' exited with code {proc.returncode}: {detail}"}
+
+    # Real output looks like: "Power Scheme GUID: 381b4222-f694-... (Balanced)"
+    # — parsed by shape (a GUID followed by a parenthesized name) rather than
+    # matched against the literal label text, since that label is localized
+    # on non-English Windows installs.
+    output = proc.stdout.strip()
+    match = re.search(
+        r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\s*\(([^)]*)\)",
+        output,
+    )
+    if not match:
+        return {"error": True, "message": f"Could not parse 'powercfg /getactivescheme' output: {output!r}"}
+
+    return {"guid": match.group(1).lower(), "name": match.group(2).strip(), "raw": output}
+
+
+@safety.register_tool(
+    name="get_windows_update_cache_size",
+    description=(
+        "Report the size and file count of the Windows Update download cache "
+        "(%WINDIR%\\SoftwareDistribution\\Download). Call when the user mentions low disk "
+        "space, to see whether clearing the Windows Update cache would help."
+    ),
+    input_schema={"type": "object", "properties": {}, "required": []},
+    tier=Tier.AUTO,
+    is_action=False,
+)
+def get_windows_update_cache_size() -> dict:
+    path = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "SoftwareDistribution", "Download")
+    return _scan_dir(path)

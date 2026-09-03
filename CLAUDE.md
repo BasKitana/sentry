@@ -20,11 +20,14 @@ copy .env.example .env                   # then fill in DEEPSEEK_API_KEY
 # Run
 python main.py
 
-# There is no automated test suite (pytest, etc.) yet. Ad-hoc verification used during
-# development and worth reusing when touching this code:
+# Tests
+pip install -r requirements-dev.txt
+.venv\Scripts\python -m pytest tests\ -v          # 160 tests, fully mocked, no live API/system calls
+
+# Other ad-hoc checks worth reusing when touching this code:
 py -m py_compile <file>.py               # syntax check a single file
 .venv\Scripts\python -c "import safety, diagnostics, actions, blocked; print(len(safety.REGISTRY))"
-                                          # registry sanity check — should print 22, no
+                                          # registry sanity check — should print 29, no
                                           # Duplicate tool name registered error
 ```
 
@@ -50,8 +53,9 @@ Tools additionally carry an optional `precheck` (`ToolSpec.precheck`), which run
 ## Known state (not yet done)
 
 - `requirements.txt` is now pinned to the exact versions verified working (`openai==3.7.0`, `psutil==7.2.2`, `pywin32==312`, `send2trash==2.1.0`, `rich==15.0.0`, `python-dotenv==1.2.3`). `requirements-dev.txt` holds `pytest==9.1.1`, kept separate so end users don't need a test runner.
-- Automated test suite exists: `tests/` (85 tests, pytest, fully mocked — no live API calls, no real Windows state touched). Run with `.venv\Scripts\python -m pytest tests\ -v`.
-- **Live DeepSeek round-trip — partially verified, one real bug found.** A simple diagnostic request worked end-to-end correctly (investigated, gave a clean final summary, no wasted calls). A broader "make it faster" request made 5 read-only tool calls and then returned an **empty final response** (`finish_reason` not `tool_calls`, `msg.content` falsy) — not yet root-caused. Mitigated, not fixed: `agent.run()` now logs the raw `finish_reason`/content via `ui.narrate_debug()` and nudges the model once with an explicit "summarize now" follow-up message before giving up, rather than silently returning `"(no response text)"`. If this recurs, the debug line printed to the console is the first thing to look at — it wasn't captured the first time this happened, so the root cause is still unconfirmed.
+- Automated test suite exists: `tests/` (160 tests, pytest, fully mocked — no live API calls, no real Windows state touched). Run with `.venv\Scripts\python -m pytest tests\ -v`.
+- **Live DeepSeek round-trip — partially verified, one real bug found, still not root-caused.** A simple diagnostic request worked end-to-end correctly. A broader "make it faster" request made 6 read-only tool calls (including two full process listings) and then returned an **empty final response** (`finish_reason` not `tool_calls`, `msg.content` falsy). Three layers of mitigation now exist, none of them a confirmed fix: (1) `MAX_TOKENS` raised 4096→8192 in `config.py` — a real hypothesis (the model may have still been processing that much tool-result volume when it hit the ceiling) but unconfirmed; (2) `agent.run()` logs the raw `finish_reason`/content via `ui.narrate_debug()` and nudges the model once with an explicit "summarize now" message before giving up; (3) if the nudge also fails, `_fallback_summary()` returns the actual gathered tool results as plain text instead of `"(no response text)"` — Python-formatted, not model-written, but never a dead end for a session that did real work. If this recurs, the debug line is the first thing to check — the root cause is still unconfirmed.
 - `restart_unresponsive_process` relaunches via `subprocess.Popen([exe])`, which drops the original command-line arguments/working directory and makes the relaunched app a child of SENTRY (inheriting its privilege level).
 - `set_startup_item_enabled` backs up the previous registry value to a `.hex` file that nothing currently reads back automatically — restoring it today is a manual `reg` operation.
-- `main.py` now runs an automatic startup health scan (`_STARTUP_SCAN_PROMPT`) before prompting, then loops asking "anything else?" until the user presses Enter with nothing typed. Each `agent.run()` call is still independent — no conversation memory carries between the startup scan and a follow-up question, or between two follow-up questions.
+- `main.py` now runs an automatic startup health scan (`_STARTUP_SCAN_PROMPT`) before prompting, then loops asking "anything else?" until the user presses Enter with nothing typed. **Short-term memory**: `main.py` creates one `agent.new_history()` list and passes it to every `agent.run()` call for the session (`history=` kwarg, mutated in place) — a follow-up like "what would disabling it do" now resolves "it" against what an earlier turn found. Memory is in-process only, never written to disk, gone when the program exits; `history=None` (the default) still gives the old memory-free one-shot behavior any other caller relies on. Per-turn state (`action_resolved`/`tool_call_log`/the nudge flag) resets every call regardless of history, so each new question still gets its own "exactly one action" allowance rather than being limited by an action taken earlier in the session.
+- The system prompt now has an explicit output-style rule: a full health check renders as a compact table with nothing else appended; any other question gets a short plain-text answer; and when nothing needs fixing, the model says so in one sentence and stops — no listing of voluntary/optional cleanups. Unverified against the live API yet (prompt-level instruction, not enforced in code).

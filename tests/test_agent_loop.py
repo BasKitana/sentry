@@ -242,3 +242,148 @@ def test_parallel_tool_calls_only_first_action_reaches_dispatch(monkeypatch):
     refusal = json.loads(tool_messages["call_2"]["content"])
     assert refusal["error"] is True
     assert "already" in refusal["message"].lower()
+
+
+# ---------------------------------------------------------------------------
+# 6. Empty final response with no prior tool calls -> bare placeholder,
+#    no nudge attempted (nothing was gathered to summarize or retry over).
+# ---------------------------------------------------------------------------
+
+def test_empty_response_with_no_prior_tool_calls_returns_placeholder_no_nudge():
+    def handler(idx, **kwargs):
+        assert idx == 0, "should not retry when nothing was ever gathered"
+        return FakeResponse(FakeMessage(content=None), "stop")
+
+    client = FakeClient(handler)
+    result = agent.run(client, "hello", model="fake-model")
+
+    assert result == "(no response text)"
+    assert len(client.chat.completions.calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# 7. Empty final response AFTER real tool calls -> one nudge retry; if the
+#    retry produces real content, that's what's returned.
+# ---------------------------------------------------------------------------
+
+def test_empty_response_after_tool_calls_is_nudged_and_recovers(monkeypatch):
+    monkeypatch.setattr(safety, "dispatch", lambda name, tool_input: ({"percent": 20.0}, False))
+
+    def handler(idx, **kwargs):
+        if idx == 0:
+            tc = FakeToolCall("call_1", "get_cpu_usage", "{}")
+            return FakeResponse(FakeMessage(tool_calls=[tc]), "tool_calls")
+        if idx == 1:
+            # Model stalls: finish_reason isn't tool_calls, but content is empty.
+            return FakeResponse(FakeMessage(content=None), "stop")
+        if idx == 2:
+            # The nudge message must be the one that provoked this retry.
+            assert kwargs["messages"][-1]["content"].startswith("You investigated")
+            return FakeResponse(FakeMessage(content="CPU is at 20%, nothing to fix."), "stop")
+        raise AssertionError(f"unexpected extra call at index {idx}")
+
+    client = FakeClient(handler)
+    result = agent.run(client, "check everything", model="fake-model")
+
+    assert result == "CPU is at 20%, nothing to fix."
+    assert len(client.chat.completions.calls) == 3
+
+
+# ---------------------------------------------------------------------------
+# 8. Empty final response persists even after the nudge -> a synthesized
+#    summary built from the real tool results, never the bare placeholder,
+#    since real work was done and shouldn't be thrown away silently.
+# ---------------------------------------------------------------------------
+
+def test_empty_response_persists_after_nudge_falls_back_to_tool_summary(monkeypatch):
+    monkeypatch.setattr(safety, "dispatch", lambda name, tool_input: ({"percent": 42.0}, False))
+
+    def handler(idx, **kwargs):
+        if idx == 0:
+            tc = FakeToolCall("call_1", "get_cpu_usage", "{}")
+            return FakeResponse(FakeMessage(tool_calls=[tc]), "tool_calls")
+        # Both the original response and the post-nudge response are empty —
+        # only one nudge is ever attempted.
+        return FakeResponse(FakeMessage(content=None), "stop")
+
+    client = FakeClient(handler)
+    result = agent.run(client, "check everything", model="fake-model")
+
+    assert result != "(no response text)"
+    assert "get cpu usage" in result
+    assert '"percent": 42.0' in result
+    # Exactly one nudge: call 0 (tool call) + call 1 (empty, triggers nudge)
+    # + call 2 (still empty, gives up) = 3 calls, not more.
+    assert len(client.chat.completions.calls) == 3
+
+
+# ---------------------------------------------------------------------------
+# 9. history=None (every test above): a fresh, memory-free history every
+#    call, matching the pre-memory behavior exactly.
+# ---------------------------------------------------------------------------
+
+def test_no_history_passed_starts_fresh_each_call():
+    def handler(idx, **kwargs):
+        assert idx == 0
+        # Exactly system + this call's user message — no memory of anything
+        # that isn't this call, matching every pre-existing test's assumption.
+        assert len(kwargs["messages"]) == 2
+        assert kwargs["messages"][0] == {"role": "system", "content": agent.SYSTEM_PROMPT}
+        assert kwargs["messages"][1] == {"role": "user", "content": "first question"}
+        return FakeResponse(FakeMessage(content="answer one"), "stop")
+
+    client = FakeClient(handler)
+    agent.run(client, "first question", model="fake-model")
+
+    # A second, independent call with no history: still starts fresh, no
+    # trace of the first call's question.
+    def handler2(idx, **kwargs):
+        assert len(kwargs["messages"]) == 2
+        assert kwargs["messages"][1] == {"role": "user", "content": "second question"}
+        return FakeResponse(FakeMessage(content="answer two"), "stop")
+
+    client2 = FakeClient(handler2)
+    agent.run(client2, "second question", model="fake-model")
+
+
+# ---------------------------------------------------------------------------
+# 10. history=<same list across calls>: real short-term memory — a later
+#     call's request actually includes the earlier turn's content, and the
+#     final answer references it as if it remembered.
+# ---------------------------------------------------------------------------
+
+def test_shared_history_across_two_calls_carries_memory(monkeypatch):
+    monkeypatch.setattr(safety, "dispatch",
+                         lambda name, tool_input: ({"name": "Docker Desktop", "enabled": True}, False))
+
+    def handler(idx, **kwargs):
+        if idx == 0:
+            tc = FakeToolCall("call_1", "list_startup_items", "{}")
+            return FakeResponse(FakeMessage(tool_calls=[tc]), "tool_calls")
+        return FakeResponse(FakeMessage(content="Docker Desktop is a startup item using RAM."), "stop")
+
+    client = FakeClient(handler)
+    history = agent.new_history()
+    first = agent.run(client, "what's using my RAM", model="fake-model", history=history)
+    assert first == "Docker Desktop is a startup item using RAM."
+
+    # Second call, same history object: the follow-up's request must include
+    # everything from the first call (system + user + assistant tool_calls +
+    # tool result + first answer) plus the new question — that's the actual
+    # mechanism of memory, not just a claim.
+    def handler2(idx, **kwargs):
+        msgs = kwargs["messages"]
+        assert msgs[0] == {"role": "system", "content": agent.SYSTEM_PROMPT}
+        assert msgs[1] == {"role": "user", "content": "what's using my RAM"}
+        assert any(m.get("role") == "tool" and "Docker Desktop" in m["content"] for m in msgs)
+        assert {"role": "assistant", "content": "Docker Desktop is a startup item using RAM."} in msgs
+        assert msgs[-1] == {"role": "user", "content": "what would disabling it do"}
+        return FakeResponse(FakeMessage(content="It just won't launch at sign-in; you can still open it anytime."), "stop")
+
+    client2 = FakeClient(handler2)
+    second = agent.run(client2, "what would disabling it do", model="fake-model", history=history)
+    assert second == "It just won't launch at sign-in; you can still open it anytime."
+
+    # And the shared history object itself grew across both calls — the
+    # exact mutation-in-place mechanism main.py relies on.
+    assert len(history) > 4

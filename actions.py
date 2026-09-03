@@ -189,6 +189,76 @@ def _precheck_not_implemented(tool_input: dict):
     return dict(_NOT_IMPLEMENTED)
 
 
+# Real, well-known Windows power scheme GUIDs (not model-guessable/free-form —
+# verified against Microsoft's own powercfg documentation, which uses the
+# Balanced GUID below in its own worked examples: https://learn.microsoft.com/
+# en-us/windows-hardware/design/device-experiences/powercfg-command-line-options).
+# set_power_plan() only ever accepts one of these three named keys; the GUID
+# on the wire is never taken from the model.
+_POWER_PLAN_GUIDS = {
+    "high_performance": "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c",
+    "balanced": "381b4222-f694-41f0-9685-ff5bb260df2e",
+    "power_saver": "a1841308-3541-4fab-bc81-f71556f20b4a",
+}
+
+
+def _precheck_power_plan(tool_input: dict):
+    plan = tool_input.get("plan")
+    if plan not in _POWER_PLAN_GUIDS:
+        return {
+            "error": True,
+            "message": f"Refused: {plan!r} is not on the power-plan allowlist "
+                       f"({', '.join(sorted(_POWER_PLAN_GUIDS))}).",
+        }
+    return None
+
+
+def _normalize_drive_letter(drive) -> str:
+    """'C:', 'C:\\\\', 'c', 'C:/' -> 'C:'. Not itself a safety check — just
+    shape normalization so the same drive can be compared against psutil's
+    partition list regardless of how it was spelled."""
+    d = str(drive or "").strip().rstrip("\\/")
+    if len(d) == 1 and d.isalpha():
+        d += ":"
+    return d.upper()
+
+
+def _find_fixed_drive(drive):
+    """Return psutil's partition info for `drive` iff it is a currently-
+    mounted, local FIXED drive — never a network/remote share, optical
+    drive, removable drive, or a drive letter that isn't actually mounted.
+    Queried fresh every call (never trusts the model's string on its own).
+    `all=True` so remote/removable/cdrom drives are actually present in the
+    list to be positively rejected by the opts check, rather than relying on
+    psutil's own default filtering to keep them out."""
+    target = _normalize_drive_letter(drive)
+    if not target:
+        return None
+    try:
+        partitions = psutil.disk_partitions(all=True)
+    except OSError:
+        return None
+    for part in partitions:
+        if _normalize_drive_letter(part.device) != target:
+            continue
+        if "fixed" in (part.opts or "").split(","):
+            return part
+    return None
+
+
+def _precheck_drive(tool_input: dict):
+    drive = tool_input.get("drive")
+    if not isinstance(drive, str) or not drive.strip():
+        return {"error": True, "message": "Refused: 'drive' must be a non-empty drive string (e.g. 'C:')."}
+    if _find_fixed_drive(drive) is None:
+        return {
+            "error": True,
+            "message": f"Refused: {drive!r} is not a currently-mounted local fixed drive. "
+                       f"Network drives, removable media, and optical drives are not supported.",
+        }
+    return None
+
+
 # ---------------------------------------------------------------------------
 # AUTO tools
 # ---------------------------------------------------------------------------
@@ -645,6 +715,324 @@ def kill_process(pid: int) -> dict:
         return {"error": True, "message": f"Sent kill signal to PID {pid} ('{proc_name}') but it did not exit within 5s."}
 
     return {"killed": True, "pid": pid, "name": proc_name, "message": f"Killed process '{proc_name}' (PID {pid})."}
+
+
+@safety.register_tool(
+    name="set_power_plan",
+    description=(
+        "Switch the active Windows power plan. `plan` must be one of a fixed allowlist: "
+        "'high_performance' (max performance, more power draw/heat/fan noise — helps a system "
+        "that feels sluggish, especially on a laptop stuck on a battery-saving plan while "
+        "plugged in), 'balanced' (Windows' default performance/power trade-off), or "
+        "'power_saver' (max battery life, reduced performance). Runs 'powercfg /setactive "
+        "<guid>' with the real Windows-defined GUID for the chosen plan. Any other value is "
+        "refused before the user is even asked to approve it."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "plan": {
+                "type": "string",
+                "enum": ["high_performance", "balanced", "power_saver"],
+                "description": "Which power plan to activate.",
+            },
+        },
+        "required": ["plan"],
+    },
+    tier=Tier.APPROVAL,
+    is_action=True,
+    precheck=_precheck_power_plan,
+)
+def set_power_plan(plan: str) -> dict:
+    guid = _POWER_PLAN_GUIDS.get(plan)
+    if guid is None:
+        return {
+            "error": True,
+            "message": f"Refused: {plan!r} is not on the power-plan allowlist "
+                       f"({', '.join(sorted(_POWER_PLAN_GUIDS))}).",
+        }
+
+    before = diagnostics.get_power_plan()
+
+    try:
+        proc = subprocess.run(
+            ["powercfg", "/setactive", guid], capture_output=True, text=True, timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return {"error": True, "message": f"Failed to switch power plan: {e}"}
+
+    if proc.returncode != 0:
+        detail = proc.stderr.strip() or proc.stdout.strip()
+        return {
+            "error": True,
+            "message": f"'powercfg /setactive {guid}' exited with code {proc.returncode}: {detail}",
+        }
+
+    after = diagnostics.get_power_plan()
+    return {
+        "changed": True, "plan": plan, "guid": guid,
+        "before": before, "after": after,
+        "message": f"Switched active power plan to '{plan}' ({guid}).",
+    }
+
+
+_VISUAL_EFFECTS_KEY = r"Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects"
+_VISUAL_FX_SETTING_NAME = "VisualFXSetting"
+_VISUAL_FX_BEST_PERFORMANCE = 2   # "Adjust for best performance" in the Performance Options UI
+_VISUAL_FX_LET_WINDOWS_CHOOSE = 0  # the Windows default, before a user ever touches this setting
+
+
+def _backup_visual_fx_setting(old_value) -> dict:
+    dest_dir = os.path.join(rollback.BACKUP_ROOT, time.strftime("%Y%m%d-%H%M%S"))
+    try:
+        os.makedirs(dest_dir, exist_ok=True)
+        dest = os.path.join(dest_dir, "visualfxsetting.txt")
+        with open(dest, "w", encoding="utf-8") as f:
+            f.write("" if old_value is None else str(old_value))
+        return {"backed_up": True, "path": dest}
+    except OSError as e:
+        return {"backed_up": False, "error": str(e)}
+
+
+@safety.register_tool(
+    name="set_visual_effects_for_performance",
+    description=(
+        "Toggle Windows' 'Adjust for best performance' visual-effects setting (the same option "
+        "System Properties > Advanced > Performance Settings exposes), via the VisualFXSetting "
+        "registry value under HKCU...Explorer\\VisualEffects. enabled=True disables window "
+        "animations, transparency, shadows, and other UI effects for a snappier-feeling but "
+        "plainer-looking desktop — worth trying on a system that feels laggy, especially with "
+        "an older/integrated GPU. enabled=False restores Windows' default ('Let Windows choose "
+        "what's best for my computer'). Explorer may need a sign-out/restart to fully reflect "
+        "the change everywhere."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "enabled": {
+                "type": "boolean",
+                "description": "True for 'best performance' (disable visual effects); False to restore the Windows default.",
+            },
+        },
+        "required": ["enabled"],
+    },
+    tier=Tier.APPROVAL,
+    is_action=True,
+)
+def set_visual_effects_for_performance(enabled: bool) -> dict:
+    try:
+        key = winreg.CreateKeyEx(
+            winreg.HKEY_CURRENT_USER, _VISUAL_EFFECTS_KEY, 0, winreg.KEY_READ | winreg.KEY_WRITE
+        )
+    except OSError as e:
+        return {"error": True, "message": f"Could not open/create the VisualEffects registry key: {e}"}
+
+    try:
+        try:
+            old_value, _ = winreg.QueryValueEx(key, _VISUAL_FX_SETTING_NAME)
+        except FileNotFoundError:
+            old_value = None  # key exists but the value has never been explicitly set
+
+        backup = _backup_visual_fx_setting(old_value)
+        new_value = _VISUAL_FX_BEST_PERFORMANCE if enabled else _VISUAL_FX_LET_WINDOWS_CHOOSE
+
+        try:
+            winreg.SetValueEx(key, _VISUAL_FX_SETTING_NAME, 0, winreg.REG_DWORD, new_value)
+            winreg.FlushKey(key)
+            readback_value, _ = winreg.QueryValueEx(key, _VISUAL_FX_SETTING_NAME)
+        except OSError as e:
+            return {
+                "error": True,
+                "message": f"Failed writing VisualFXSetting: {e}",
+                "backup": backup,
+            }
+    finally:
+        winreg.CloseKey(key)
+
+    confirmed = readback_value == new_value
+    target_label = "best performance" if enabled else "the Windows default ('Let Windows choose')"
+    return {
+        "changed": True, "confirmed": confirmed, "enabled": enabled,
+        "before": old_value, "after": readback_value,
+        "backup": backup,
+        "message": (
+            f"Set visual effects to {target_label} "
+            f"({'confirmed on read-back' if confirmed else 'WARNING: read-back did not match what was written'}). "
+            f"Sign out or restart apps for the change to fully apply everywhere."
+        ),
+    }
+
+
+@safety.register_tool(
+    name="optimize_drive",
+    description=(
+        "Run Windows' modern built-in drive optimizer ('defrag <drive> /O'), which auto-detects "
+        "the media type and does the right thing — defragments a traditional HDD, or retrims an "
+        "SSD/NVMe drive — without the caller needing to know which. Helps with a drive that "
+        "feels slow due to fragmentation (HDD) or with reclaiming SSD write performance over "
+        "time (retrim). Only a real, currently-mounted local FIXED drive is accepted; network "
+        "drives, removable media, and optical drives are refused. Can take a while on a large "
+        "or heavily fragmented drive."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "drive": {"type": "string", "description": "Drive letter to optimize, e.g. 'C:'."},
+        },
+        "required": ["drive"],
+    },
+    tier=Tier.APPROVAL,
+    is_action=True,
+    precheck=_precheck_drive,
+)
+def optimize_drive(drive: str) -> dict:
+    part = _find_fixed_drive(drive)
+    if part is None:
+        return {
+            "error": True,
+            "message": f"Refused: {drive!r} is not a currently-mounted local fixed drive.",
+        }
+
+    letter = _normalize_drive_letter(drive)
+    try:
+        proc = subprocess.run(
+            ["defrag", letter, "/O"], capture_output=True, text=True, timeout=1800,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return {"error": True, "message": f"Failed to run drive optimization on '{letter}': {e}"}
+
+    if proc.returncode != 0:
+        detail = proc.stderr.strip() or proc.stdout.strip()
+        return {
+            "error": True,
+            "message": f"'defrag {letter} /O' exited with code {proc.returncode}: {detail}",
+        }
+
+    return {
+        "optimized": True, "drive": letter,
+        "message": f"Optimized '{letter}' (auto-detected: HDD defrag or SSD retrim, whichever applies).",
+        "output": proc.stdout.strip(),
+    }
+
+
+_WINDOWS_UPDATE_SERVICE = "wuauserv"
+
+
+@safety.register_tool(
+    name="clear_windows_update_cache",
+    description=(
+        "Run Microsoft's standard Windows Update repair steps: stop the Windows Update service "
+        "(wuauserv), delete the contents of %WINDIR%\\SoftwareDistribution\\Download (the "
+        "downloaded-but-not-yet-installed update cache), then restart the service. This can "
+        "reclaim significant disk space and clear a stuck or corrupted update download; Windows "
+        "will simply re-download anything it still needs. Call when Windows Update is stuck or "
+        "failing repeatedly, or when get_windows_update_cache_size() shows a large cache."
+    ),
+    input_schema={"type": "object", "properties": {}, "required": []},
+    tier=Tier.APPROVAL,
+    is_action=True,
+)
+def clear_windows_update_cache() -> dict:
+    download_dir = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "SoftwareDistribution", "Download")
+
+    try:
+        win32serviceutil.StopService(_WINDOWS_UPDATE_SERVICE)
+    except pywintypes.error as e:
+        return {"error": True, "message": f"Failed to stop '{_WINDOWS_UPDATE_SERVICE}': {e}"}
+    except Exception as e:  # noqa: BLE001 - win32serviceutil can surface other error types
+        return {"error": True, "message": f"Failed to stop '{_WINDOWS_UPDATE_SERVICE}': {e}"}
+
+    freed_bytes = 0
+    deleted = 0
+    skipped = 0
+    scan_error = None
+    try:
+        entries = list(os.scandir(download_dir))
+    except OSError as e:
+        entries = []
+        scan_error = str(e)
+
+    for entry in entries:
+        try:
+            if entry.is_dir(follow_symlinks=False):
+                size = _dir_size(entry.path)
+                import shutil
+                shutil.rmtree(entry.path)
+            else:
+                size = entry.stat().st_size
+                os.remove(entry.path)
+            freed_bytes += size
+            deleted += 1
+        except OSError:
+            skipped += 1
+
+    try:
+        win32serviceutil.StartService(_WINDOWS_UPDATE_SERVICE)
+        restart_error = None
+    except pywintypes.error as e:
+        restart_error = str(e)
+    except Exception as e:  # noqa: BLE001
+        restart_error = str(e)
+
+    freed_mb = round(freed_bytes / 2**20, 2)
+    result = {
+        "cleared": True,
+        "download_dir": download_dir,
+        "items_deleted": deleted,
+        "items_skipped": skipped,
+        "freed_mb": freed_mb,
+        "service_restarted": restart_error is None,
+        "message": (
+            f"Cleared {deleted} item(s) from '{download_dir}' (~{freed_mb} MB freed), "
+            f"skipped {skipped} in-use/inaccessible item(s). "
+            + (f"Restarted '{_WINDOWS_UPDATE_SERVICE}'."
+               if restart_error is None
+               else f"WARNING: failed to restart '{_WINDOWS_UPDATE_SERVICE}': {restart_error}. "
+                    f"Windows Update is left stopped — restart it manually (services.msc).")
+        ),
+    }
+    if scan_error:
+        result["scan_error"] = scan_error
+    if restart_error:
+        result["error"] = True
+    return result
+
+
+@safety.register_tool(
+    name="run_component_cleanup",
+    description=(
+        "Run DISM component-store cleanup ('Dism.exe /online /Cleanup-Image "
+        "/StartComponentCleanup') to remove superseded versions of Windows Update components "
+        "from the WinSxS component store, freeing disk space. Deliberately does NOT use "
+        "/ResetBase, so previously installed updates can still be uninstalled afterward if "
+        "needed. Can take several minutes. Call when disk space is low and the component "
+        "store/WinSxS looks like a meaningful contributor."
+    ),
+    input_schema={"type": "object", "properties": {}, "required": []},
+    tier=Tier.APPROVAL,
+    is_action=True,
+)
+def run_component_cleanup() -> dict:
+    try:
+        proc = subprocess.run(
+            ["Dism.exe", "/online", "/Cleanup-Image", "/StartComponentCleanup"],
+            capture_output=True, text=True, timeout=1800,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return {"error": True, "message": f"Failed to run DISM component cleanup: {e}"}
+
+    if proc.returncode != 0:
+        detail = proc.stderr.strip() or proc.stdout.strip()
+        return {
+            "error": True,
+            "message": f"DISM component cleanup exited with code {proc.returncode}: {detail}",
+        }
+
+    return {
+        "cleaned_up": True,
+        "message": "DISM component cleanup completed — superseded Windows Update components removed from the component store.",
+        "output": proc.stdout.strip(),
+    }
 
 
 # ---------------------------------------------------------------------------

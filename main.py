@@ -57,8 +57,14 @@ def main() -> None:
     _check_admin()
     client = _build_client()
 
+    # One growing history for the whole session, so a follow-up like "what
+    # would disabling it do" can resolve "it" against something the startup
+    # scan (or an earlier follow-up) already found — short-term memory only,
+    # never written to disk, gone when this process exits.
+    history = agent.new_history()
+
     print("Running startup health check...\n")
-    print(agent.run(client, _STARTUP_SCAN_PROMPT))
+    print(agent.run(client, _STARTUP_SCAN_PROMPT, history=history))
 
     while True:
         print()
@@ -66,7 +72,7 @@ def main() -> None:
         if not problem:
             return
         print()
-        print(agent.run(client, problem))
+        print(agent.run(client, problem, history=history))
 
 
 if __name__ == "__main__":

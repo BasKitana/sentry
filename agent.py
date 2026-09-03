@@ -38,7 +38,18 @@ performed a hardware fix.
 
 Always finish with a real answer for the user, even when nothing needs fixing — after you've \
 investigated, you must produce a final text summary. Never end a turn with tool calls and no \
-following explanation."""
+following explanation.
+
+Output style: keep it short. For a full health check (the startup scan, or when explicitly \
+asked to check everything), present findings as a compact table — metric, reading, one-word \
+status — and nothing else; do not also restate each row as prose afterward. For any other \
+question, skip the table and answer in a few plain sentences. In both cases: if something \
+genuinely needs attention, state it plainly and either propose your one fix or say what to \
+check next. If nothing needs fixing, say that in one short sentence and stop there — do not \
+list voluntary/optional cleanups, do not pad with reassurance, do not suggest a low-value \
+action just to have something to offer. You may have earlier turns in this conversation — use \
+that context (e.g. "it" can refer to something you already found or mentioned) instead of \
+asking the user to repeat themselves."""
 
 
 def build_tools() -> list[dict]:
@@ -48,15 +59,46 @@ def build_tools() -> list[dict]:
     } for s in safety.REGISTRY.values()]
 
 
-def run(client, user_problem: str, model: str = config.DEFAULT_MODEL) -> str:
+def new_history() -> list[dict]:
+    """A fresh conversation history, seeded with the system prompt. Pass the
+    same list back into run() across multiple calls to keep short-term
+    memory within one session (main.py does this for follow-up questions) —
+    without it, every call starts from zero and "it"/"that" in a follow-up
+    has nothing to resolve against."""
+    return [{"role": "system", "content": SYSTEM_PROMPT}]
+
+
+def _fallback_summary(tool_call_log: list[tuple[str, dict]]) -> str:
+    """Build a plain-text summary directly from what was actually gathered,
+    for the worst case where the model never produced final text at all
+    (even after the one-shot nudge in run()). A session that did real work
+    should never hand the user a bare "no response" — this is Python
+    formatting the tool's own structured results, not the model talking."""
+    if not tool_call_log:
+        return "(no response text)"
+    lines = ["I gathered the following before losing the connection to a final answer:"]
+    for name, result in tool_call_log:
+        label = name.replace("_", " ")
+        lines.append(f"- {label}: {json.dumps(result, default=str)}")
+    lines.append("\nNo AI-written analysis was produced for this data — try asking again.")
+    return "\n".join(lines)
+
+
+def run(client, user_problem: str, model: str = config.DEFAULT_MODEL,
+        history: list[dict] | None = None) -> str:
+    """Run one turn. `history` is mutated in place (a new user message is
+    appended, then every assistant/tool message the loop produces) so the
+    caller's own reference keeps growing — pass the same list back in on the
+    next call for short-term memory across a session. Leave it None for a
+    one-shot, memory-free call (each existing caller that doesn't pass it
+    keeps working exactly as before)."""
     tools = build_tools()
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": user_problem},
-    ]
+    messages = new_history() if history is None else history
+    messages.append({"role": "user", "content": user_problem})
     action_resolved = False
     any_tool_called = False
     nudged = False
+    tool_call_log: list[tuple[str, dict]] = []
 
     for _ in range(config.MAX_ITERATIONS):
         response = client.chat.completions.create(
@@ -91,7 +133,7 @@ def run(client, user_problem: str, model: str = config.DEFAULT_MODEL) -> str:
                                "say plainly that nothing needs fixing.",
                 })
                 continue
-            return "(no response text)"
+            return _fallback_summary(tool_call_log)
 
         any_tool_called = True
         for tool_call in msg.tool_calls:
@@ -121,6 +163,7 @@ def run(client, user_problem: str, model: str = config.DEFAULT_MODEL) -> str:
                 ui.narrate(name, tool_input)
                 result, resolved = safety.dispatch(name, tool_input)
                 action_resolved = action_resolved or resolved
+                tool_call_log.append((name, result))
             messages.append({
                 "role": "tool",
                 "tool_call_id": tool_call.id,
