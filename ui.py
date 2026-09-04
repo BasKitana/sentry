@@ -1,4 +1,4 @@
-"""S.E.N.T.R.Y. CLI presentation layer.
+"""Your Own AI IT — CLI presentation layer.
 
 rich-based narration and confirmation prompts. This module has no OS side
 effects of its own — it only ever talks to the terminal. `safety.dispatch()`

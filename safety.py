@@ -1,4 +1,4 @@
-"""S.E.N.T.R.Y. tool registry and safety-tier enforcement — the gate.
+"""Your Own AI IT — tool registry and safety-tier enforcement (the gate).
 
 This is the one module every tool call from the model must pass through.
 The model never gets raw shell/OS access; it can only name a registered

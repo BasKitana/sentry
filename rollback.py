@@ -1,4 +1,4 @@
-"""S.E.N.T.R.Y. rollback mechanism: System Restore point + file backup.
+"""Your Own AI IT — rollback mechanism: System Restore point + file backup.
 
 Every APPROVAL-tier tool call gets a rollback point created before it
 executes (see safety.dispatch()), so a mistake can be undone. There is no
@@ -18,7 +18,7 @@ import os, shutil, time
 from dataclasses import dataclass
 import win32com.client, pywintypes
 
-BACKUP_ROOT = os.path.join(os.environ.get("LOCALAPPDATA", "."), "SENTRY", "backups")
+BACKUP_ROOT = os.path.join(os.environ.get("LOCALAPPDATA", "."), "YourOwnAI-IT", "backups")
 
 
 @dataclass
@@ -54,4 +54,4 @@ def backup_file(path: str) -> RollbackResult:
 def create_rollback_point(spec, tool_input) -> RollbackResult:
     if "path" in tool_input:
         return backup_file(tool_input["path"])
-    return create_system_restore_point(f"S.E.N.T.R.Y.: {spec.name}", spec.restore_point_type)
+    return create_system_restore_point(f"Your Own AI IT: {spec.name}", spec.restore_point_type)
