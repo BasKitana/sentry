@@ -1,4 +1,4 @@
-"""Your Own AI IT — agent loop: the manual DeepSeek tool-calling loop.
+"""Your Own AI I.T. — agent loop: the manual DeepSeek tool-calling loop.
 
 Zero OS-touching code lives here. The model only ever sees JSON tool
 schemas (built from safety.REGISTRY) and JSON tool results (from
@@ -11,7 +11,7 @@ import config
 import safety
 import ui
 
-SYSTEM_PROMPT = """You are Your Own AI IT, a Windows system-health assistant running on the \
+SYSTEM_PROMPT = """You are Your Own AI I.T., a Windows system-health assistant running on the \
 user's own PC. You have NO shell, filesystem, or OS access except through the tools provided \
 — every tool call is intercepted and safety-checked by the application before anything runs; \
 you cannot bypass this by asking differently.

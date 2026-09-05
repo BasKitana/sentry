@@ -1,4 +1,4 @@
-"""Your Own AI IT — rollback mechanism: System Restore point + file backup.
+"""Your Own AI I.T. — rollback mechanism: System Restore point + file backup.
 
 Every APPROVAL-tier tool call gets a rollback point created before it
 executes (see safety.dispatch()), so a mistake can be undone. There is no
@@ -54,4 +54,4 @@ def backup_file(path: str) -> RollbackResult:
 def create_rollback_point(spec, tool_input) -> RollbackResult:
     if "path" in tool_input:
         return backup_file(tool_input["path"])
-    return create_system_restore_point(f"Your Own AI IT: {spec.name}", spec.restore_point_type)
+    return create_system_restore_point(f"Your Own AI I.T.: {spec.name}", spec.restore_point_type)

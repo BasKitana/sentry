@@ -1,4 +1,4 @@
-"""Your Own AI IT — configuration constants.
+"""Your Own AI I.T. — configuration constants.
 
 Model constants and loop tuning for the DeepSeek-V4-Flash agent loop.
 BACKUP_ROOT (rollback file-backup location) lives in rollback.py, not here.

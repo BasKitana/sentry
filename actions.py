@@ -1,4 +1,4 @@
-"""Your Own AI IT — AUTO + APPROVAL tools: real side effects.
+"""Your Own AI I.T. — AUTO + APPROVAL tools: real side effects.
 
 Every function here is registered into safety.REGISTRY as an import side
 effect (via the @safety.register_tool decorator). Nothing outside this

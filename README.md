@@ -1,4 +1,4 @@
-# Your Own AI IT
+# Your Own AI I.T.
 
 A local AI system-health assistant for Windows. Describe a problem in plain language — it investigates your PC, tells you what it found, and either fixes it automatically (for safe, reversible things) or asks for your explicit yes/no before doing anything that actually changes your system.
 

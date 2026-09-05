@@ -30,12 +30,12 @@ def test_create_system_restore_point_success(monkeypatch):
         rollback.win32com.client, "GetObject", lambda moniker: FakeSystemRestore()
     )
 
-    result = rollback.create_system_restore_point("Your Own AI IT: test action", 12)
+    result = rollback.create_system_restore_point("Your Own AI I.T.: test action", 12)
 
     assert result.failed is False
     assert result.method == "system_restore"
     assert "created" in result.detail.lower()
-    assert calls == [("Your Own AI IT: test action", 12, 100)]
+    assert calls == [("Your Own AI I.T.: test action", 12, 100)]
 
 
 def test_create_system_restore_point_nonzero_hresult_is_a_failure(monkeypatch):
@@ -47,7 +47,7 @@ def test_create_system_restore_point_nonzero_hresult_is_a_failure(monkeypatch):
         rollback.win32com.client, "GetObject", lambda moniker: FakeSystemRestore()
     )
 
-    result = rollback.create_system_restore_point("Your Own AI IT: test action", 12)
+    result = rollback.create_system_restore_point("Your Own AI I.T.: test action", 12)
 
     assert result.failed is True
     assert result.method == "system_restore"
@@ -61,7 +61,7 @@ def test_create_system_restore_point_com_error_is_caught_not_propagated(monkeypa
     monkeypatch.setattr(rollback.win32com.client, "GetObject", raise_com_error)
 
     # Must not raise — the whole point is that this is caught and converted.
-    result = rollback.create_system_restore_point("Your Own AI IT: test action", 12)
+    result = rollback.create_system_restore_point("Your Own AI I.T.: test action", 12)
 
     assert result.failed is True
     assert result.method == "system_restore"
@@ -150,5 +150,5 @@ def test_create_rollback_point_routes_to_system_restore_when_no_path(monkeypatch
 
     result = rollback.create_rollback_point(_FakeSpec(name="kill_process", restore_point_type=12), {"pid": 4242})
 
-    assert calls == [("Your Own AI IT: kill_process", 12)]
+    assert calls == [("Your Own AI I.T.: kill_process", 12)]
     assert result.method == "system_restore"

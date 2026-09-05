@@ -1,4 +1,4 @@
-"""Your Own AI IT — entry point.
+"""Your Own AI I.T. — entry point.
 
 Loads configuration, does a best-effort elevation check, takes the user's
 problem description, and hands it to the DeepSeek tool-calling agent loop.

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Your Own AI IT is a local, single-user Windows CLI tool: the user describes a problem in plain language, a DeepSeek-V4-Flash agent investigates via read-only diagnostics, proposes one fix, and a Python-side safety gate decides whether it runs immediately, needs the user's approval, or is refused outright. The model never gets shell/OS access — only named, schema-defined tool calls that pass through `safety.dispatch()`.
+Your Own AI I.T. is a local, single-user Windows CLI tool: the user describes a problem in plain language, a DeepSeek-V4-Flash agent investigates via read-only diagnostics, proposes one fix, and a Python-side safety gate decides whether it runs immediately, needs the user's approval, or is refused outright. The model never gets shell/OS access — only named, schema-defined tool calls that pass through `safety.dispatch()`.
 
 v1 is personal-use only (single Anthropic-style `.env` key, no multi-user/billing layer). A UI and productization are explicitly out of scope for the current codebase.
 

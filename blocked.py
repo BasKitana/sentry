@@ -1,4 +1,4 @@
-"""Your Own AI IT — BLOCKED-tier tool registrations.
+"""Your Own AI I.T. — BLOCKED-tier tool registrations.
 
 These are the actions the model may never take, now or with any future
 override. Each entry here is schema + description ONLY — there is no
